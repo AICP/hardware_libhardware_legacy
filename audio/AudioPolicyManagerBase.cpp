@@ -541,7 +541,7 @@ audio_io_handle_t AudioPolicyManagerBase::getOutput(AudioSystem::stream_type str
     routing_strategy strategy = getStrategy((AudioSystem::stream_type)stream);
     audio_devices_t device = getDeviceForStrategy(strategy, false /*fromCache*/);
     IOProfile *profile = NULL;
-    ALOGV("getOutput() device %d, stream %d, samplingRate %d, format %x, channelMask %x, flags %x",
+    ALOGD("getOutput() device %d, stream %d, samplingRate %d, format %x, channelMask %x, flags %x",
           device, stream, samplingRate, format, channelMask, flags);
 
 #ifdef AUDIO_POLICY_TEST
@@ -689,7 +689,7 @@ audio_io_handle_t AudioPolicyManagerBase::getOutput(AudioSystem::stream_type str
     ALOGW_IF((output == 0), "getOutput() could not find output for stream %d, samplingRate %d,"
             "format %d, channels %x, flags %x", stream, samplingRate, format, channelMask, flags);
 
-    ALOGV("getOutput() returns output %d", output);
+    ALOGD("getOutput() returns output %d", output);
 
     return output;
 }
@@ -744,7 +744,7 @@ status_t AudioPolicyManagerBase::startOutput(audio_io_handle_t output,
                                              AudioSystem::stream_type stream,
                                              int session)
 {
-    ALOGV("startOutput() output %d, stream %d, session %d", output, stream, session);
+    ALOGD("startOutput() output %d, stream %d, session %d", output, stream, session);
     ssize_t index = mOutputs.indexOfKey(output);
     if (index < 0) {
         ALOGW("startOutput() unknow output %d", output);
@@ -822,7 +822,7 @@ status_t AudioPolicyManagerBase::stopOutput(audio_io_handle_t output,
     AudioOutputDescriptor *outputDesc = mOutputs.valueAt(index);
 
     // handle special case for sonification while in call
-    if (isInCall()) {
+    if ((isInCall()) && (outputDesc->mRefCount[stream] == 1)) {
         handleIncallSonification(stream, false, false);
     }
 
@@ -917,7 +917,7 @@ audio_io_handle_t AudioPolicyManagerBase::getInput(int inputSource,
     audio_io_handle_t input = 0;
     audio_devices_t device = getDeviceForInputSource(inputSource);
 
-    ALOGV("getInput() inputSource %d, samplingRate %d, format %d, channelMask %x, acoustics %x",
+    ALOGD("getInput() inputSource %d, samplingRate %d, format %d, channelMask %x, acoustics %x",
           inputSource, samplingRate, format, channelMask, acoustics);
 
     if (device == AUDIO_DEVICE_NONE) {
@@ -984,6 +984,8 @@ audio_io_handle_t AudioPolicyManagerBase::getInput(int inputSource,
         return 0;
     }
     mInputs.add(input, inputDesc);
+    ALOGD("getInput() returns input %d", input);
+
     return input;
 }
 
@@ -1480,15 +1482,6 @@ bool AudioPolicyManagerBase::isOffloadSupported(const audio_offload_info_t& offl
      offloadInfo.stream_type, offloadInfo.bit_rate, offloadInfo.duration_us,
      offloadInfo.has_video);
 
-    // Check if offload has been disabled
-    char propValue[PROPERTY_VALUE_MAX];
-    if (property_get("audio.offload.disable", propValue, "0")) {
-        if (atoi(propValue) != 0) {
-            ALOGV("offload disabled by audio.offload.disable=%s", propValue );
-            return false;
-        }
-    }
-
     // Check if stream type is music, then only allow offload as of now.
     if (offloadInfo.stream_type != AUDIO_STREAM_MUSIC)
     {
@@ -1496,39 +1489,76 @@ bool AudioPolicyManagerBase::isOffloadSupported(const audio_offload_info_t& offl
         return false;
     }
 
-    //TODO: enable audio offloading with video when ready
+    char propValue[PROPERTY_VALUE_MAX];
+    bool pcmOffload = false;
+    if (audio_is_offload_pcm(offloadInfo.format)) {
+        if(property_get("audio.offload.pcm.enable", propValue, "false")) {
+            bool prop_enabled = atoi(propValue) || !strncmp("true", propValue, 4);
+            if (prop_enabled) {
+                ALOGW("PCM offload property is enabled");
+                pcmOffload = true;
+            }
+        }
+        if (!pcmOffload) {
+            ALOGD("copl: PCM offload disabled by property audio.offload.pcm.enable");
+            return false;
+        }
+    }
+
+    // Check if offload has been disabled
+    if (property_get("audio.offload.disable", propValue, "0")) {
+        if (atoi(propValue) != 0) {
+            ALOGD("copl: offload disabled by audio.offload.disable=%s", propValue );
+            return false;
+        }
+    }
+
+    //check if it's multi-channel AAC format
+    if (AudioSystem::popCount(offloadInfo.channel_mask) > 2
+          && offloadInfo.format == AUDIO_FORMAT_AAC) {
+        ALOGD("copl: offload disabled for multi-channel AAC format");
+        return false;
+    }
+
     if (offloadInfo.has_video)
     {
         if(property_get("av.offload.enable", propValue, "false")) {
             bool prop_enabled = atoi(propValue) || !strncmp("true", propValue, 4);
             if (!prop_enabled) {
-               ALOGW("offload disabled by av.offload.enable = %s ", propValue );
-               return false;
+                ALOGW("offload disabled by av.offload.enable = %s ", propValue );
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        if(offloadInfo.is_streaming) {
+            if (property_get("av.streaming.offload.enable", propValue, "false")) {
+                bool prop_enabled = atoi(propValue) || !strncmp("true", propValue, 4);
+                if (!prop_enabled) {
+                   ALOGW("offload disabled by av.streaming.offload.enable = %s ", propValue );
+                   return false;
+                }
+            } else {
+                //Do not offload AV streamnig if the property is not defined
+                return false;
             }
         }
-        if(offloadInfo.is_streaming &&
-           property_get("av.streaming.offload.enable", propValue, "false")) {
-            bool prop_enabled = atoi(propValue) || !strncmp("true", propValue, 4);
-            if (!prop_enabled) {
-               ALOGW("offload disabled by av.streaming.offload.enable = %s ", propValue );
-               return false;
-            }
-        }
-        ALOGV("isOffloadSupported: has_video == true, property\
+        ALOGD("copl: isOffloadSupported: has_video == true, property\
                 set to enable offload");
     }
 
     //If duration is less than minimum value defined in property, return false
     if (property_get("audio.offload.min.duration.secs", propValue, NULL)) {
         if (offloadInfo.duration_us < (atoi(propValue) * 1000000 )) {
-            ALOGV("Offload denied by duration < audio.offload.min.duration.secs(=%s)", propValue);
+            ALOGD("copl: Offload denied by duration < audio.offload.min.duration.secs(=%s)", propValue);
             return false;
         }
     } else if (offloadInfo.duration_us < OFFLOAD_DEFAULT_MIN_DURATION_SECS * 1000000) {
-        ALOGV("Offload denied by duration < default min(=%u)", OFFLOAD_DEFAULT_MIN_DURATION_SECS);
+        ALOGD("copl: Offload denied by duration < default min(=%u)", OFFLOAD_DEFAULT_MIN_DURATION_SECS);
         //duration checks only valid for MP3/AAC formats,
         //do not check duration for other audio formats, e.g. dolby AAC/AC3 and amrwb+ formats
-        if (offloadInfo.format == AUDIO_FORMAT_MP3 || offloadInfo.format == AUDIO_FORMAT_AAC)
+        if (offloadInfo.format == AUDIO_FORMAT_MP3 || offloadInfo.format == AUDIO_FORMAT_AAC || (pcmOffload && offloadInfo.bit_width < 24))
             return false;
     }
 
@@ -2056,7 +2086,7 @@ status_t AudioPolicyManagerBase::checkOutputsForDevice(audio_devices_t device,
 
 void AudioPolicyManagerBase::closeOutput(audio_io_handle_t output)
 {
-    ALOGV("closeOutput(%d)", output);
+    ALOGD("closeOutput(%d)", output);
 
     AudioOutputDescriptor *outputDesc = mOutputs.valueFor(output);
     if (outputDesc == NULL) {
@@ -2234,7 +2264,7 @@ void AudioPolicyManagerBase::checkA2dpSuspend()
     if (mA2dpSuspended) {
         if (((mScoDeviceAddress == "") ||
              ((mForceUse[AudioSystem::FOR_COMMUNICATION] != AudioSystem::FORCE_BT_SCO) &&
-              (mForceUse[AudioSystem::FOR_RECORD] != AudioSystem::FORCE_BT_SCO))) &&
+              (mForceUse[AudioSystem::FOR_RECORD] != AudioSystem::FORCE_BT_SCO))) ||
              ((mPhoneState != AudioSystem::MODE_IN_CALL) &&
               (mPhoneState != AudioSystem::MODE_RINGTONE))) {
 
@@ -2244,7 +2274,7 @@ void AudioPolicyManagerBase::checkA2dpSuspend()
     } else {
         if (((mScoDeviceAddress != "") &&
              ((mForceUse[AudioSystem::FOR_COMMUNICATION] == AudioSystem::FORCE_BT_SCO) ||
-              (mForceUse[AudioSystem::FOR_RECORD] == AudioSystem::FORCE_BT_SCO))) ||
+              (mForceUse[AudioSystem::FOR_RECORD] == AudioSystem::FORCE_BT_SCO))) &&
              ((mPhoneState == AudioSystem::MODE_IN_CALL) ||
               (mPhoneState == AudioSystem::MODE_RINGTONE))) {
 
@@ -2638,6 +2668,9 @@ uint32_t AudioPolicyManagerBase::checkDeviceMuteStrategies(AudioOutputDescriptor
     // wait for the PCM output buffers to empty before proceeding with the rest of the command
     if (muteWaitMs > delayMs) {
         muteWaitMs -= delayMs;
+        if(outputDesc->mDevice == AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET) {
+           muteWaitMs = muteWaitMs+10;
+        }
         usleep(muteWaitMs * 1000);
         return muteWaitMs;
     }
@@ -2694,7 +2727,8 @@ uint32_t AudioPolicyManagerBase::setOutputDevice(audio_io_handle_t output,
         return muteWaitMs;
     }
 
-    ALOGV("setOutputDevice() changing device");
+    ALOGD("setOutputDevice() changing device from (%d) to (%d) \
+        force (%d) delayMs (%d) on Output (%d)", prevDevice, device, force, delayMs, output);
     // do the routing
     param.addInt(String8(AudioParameter::keyRouting), (int)device);
     mpClientInterface->setParameters(output, param.toString(), delayMs);
@@ -3571,7 +3605,7 @@ void AudioPolicyManagerBase::HwModule::dump(int fd)
     result.append(buffer);
     write(fd, result.string(), result.size());
     if (mOutputProfiles.size()) {
-        write(fd, "  - outputs:\n", sizeof("  - outputs:\n"));
+        write(fd, "  - outputs:\n", sizeof("  - outputs:\n") - 1);
         for (size_t i = 0; i < mOutputProfiles.size(); i++) {
             snprintf(buffer, SIZE, "    output %d:\n", i);
             write(fd, buffer, strlen(buffer));
@@ -3579,7 +3613,7 @@ void AudioPolicyManagerBase::HwModule::dump(int fd)
         }
     }
     if (mInputProfiles.size()) {
-        write(fd, "  - inputs:\n", sizeof("  - inputs:\n"));
+        write(fd, "  - inputs:\n", sizeof("  - inputs:\n") - 1);
         for (size_t i = 0; i < mInputProfiles.size(); i++) {
             snprintf(buffer, SIZE, "    input %d:\n", i);
             write(fd, buffer, strlen(buffer));
@@ -3785,7 +3819,10 @@ const struct StringToEnum sFormatNameToEnumTable[] = {
     STRING_TO_ENUM(AUDIO_FORMAT_QCELP),
     STRING_TO_ENUM(AUDIO_FORMAT_MP2),
     STRING_TO_ENUM(AUDIO_FORMAT_EVRCNW),
+    STRING_TO_ENUM(AUDIO_FORMAT_FLAC),
 #endif
+    STRING_TO_ENUM(AUDIO_FORMAT_PCM_16_BIT_OFFLOAD),
+    STRING_TO_ENUM(AUDIO_FORMAT_PCM_24_BIT_OFFLOAD),
 };
 
 const struct StringToEnum sOutChannelsNameToEnumTable[] = {
