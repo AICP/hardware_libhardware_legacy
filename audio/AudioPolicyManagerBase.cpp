@@ -1491,8 +1491,6 @@ bool AudioPolicyManagerBase::isOffloadSupported(const audio_offload_info_t& offl
 
     char propValue[PROPERTY_VALUE_MAX];
     bool pcmOffload = false;
-
-#if defined(ENABLE_AV_ENHANCEMENTS) || defined(ENABLE_OFFLOAD_ENHANCEMENTS)
     if (audio_is_offload_pcm(offloadInfo.format)) {
         if(property_get("audio.offload.pcm.enable", propValue, "false")) {
             bool prop_enabled = atoi(propValue) || !strncmp("true", propValue, 4);
@@ -1506,7 +1504,6 @@ bool AudioPolicyManagerBase::isOffloadSupported(const audio_offload_info_t& offl
             return false;
         }
     }
-#endif
 
     // Check if offload has been disabled
     if (property_get("audio.offload.disable", propValue, "0")) {
@@ -3824,10 +3821,8 @@ const struct StringToEnum sFormatNameToEnumTable[] = {
     STRING_TO_ENUM(AUDIO_FORMAT_EVRCNW),
     STRING_TO_ENUM(AUDIO_FORMAT_FLAC),
 #endif
-#if defined(ENABLE_AV_ENHANCEMENTS) || defined(ENABLE_OFFLOAD_ENHANCEMENTS)
     STRING_TO_ENUM(AUDIO_FORMAT_PCM_16_BIT_OFFLOAD),
     STRING_TO_ENUM(AUDIO_FORMAT_PCM_24_BIT_OFFLOAD),
-#endif
 };
 
 const struct StringToEnum sOutChannelsNameToEnumTable[] = {
